@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{% block title %}Inventory System{% endblock %}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">📦 Inventory System</div>
+        <div class="nav-links">
+            <a href="/">Dashboard</a>
+            <a href="/ui/products">Products</a>
+            <a href="/ui/inventory">Inventory</a>
+            <a href="/ui/customers">Customers</a>
+            <a href="/ui/orders">Orders</a>
+        </div>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

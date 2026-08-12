@@ -3,11 +3,19 @@ from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 import models
 import schemas
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
+from fastapi import Request, Form
+from fastapi.responses import RedirectResponse
+
+
 
 # Creates all tables (based on models.py) in the database if they don't exist yet.
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Inventory Management System")
+templates = Jinja2Templates(directory="templates")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # Creates a new DB session for each request, and closes it afterward.
@@ -20,8 +28,20 @@ def get_db():
 
 
 @app.get("/")
-def read_root():
-    return {"message": "Inventory API is running"}
+def dashboard(request: Request, db: Session = Depends(get_db)):
+    product_count = db.query(models.Product).count()
+    customer_count = db.query(models.Customer).count()
+    order_count = db.query(models.Order).count()
+    total_stock = sum(inv.quantity for inv in db.query(models.Inventory).all())
+    recent_orders = db.query(models.Order).order_by(models.Order.id.desc()).limit(5).all()
+
+    return templates.TemplateResponse(request, "dashboard.html", {
+        "product_count": product_count,
+        "customer_count": customer_count,
+        "order_count": order_count,
+        "total_stock": total_stock,
+        "recent_orders": recent_orders,
+    })
 
 
 @app.get("/health")
@@ -296,3 +316,155 @@ def update_order_status(order_id: int, status: str, db: Session = Depends(get_db
     db.commit()
     db.refresh(order)
     return order
+
+# ---------- UI ROUTES: PRODUCTS ----------
+
+@app.get("/ui/products")
+def ui_products(request: Request, db: Session = Depends(get_db)):
+    products = db.query(models.Product).all()
+    return templates.TemplateResponse(request, "products.html", {"products": products})
+
+
+@app.post("/ui/products/create")
+def ui_create_product(
+    name: str = Form(...),
+    sku: str = Form(...),
+    description: str = Form(""),
+    price: float = Form(...),
+    db: Session = Depends(get_db),
+):
+    new_product = models.Product(name=name, sku=sku, description=description or None, price=price)
+    db.add(new_product)
+    db.commit()
+    return RedirectResponse(url="/ui/products", status_code=303)
+
+
+@app.post("/ui/products/{product_id}/delete")
+def ui_delete_product(product_id: int, db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if product:
+        db.delete(product)
+        db.commit()
+    return RedirectResponse(url="/ui/products", status_code=303)
+
+# ---------- UI ROUTES: INVENTORY ----------
+
+@app.get("/ui/inventory")
+def ui_inventory(request: Request, db: Session = Depends(get_db)):
+    inventory = db.query(models.Inventory).all()
+    products = db.query(models.Product).all()
+    return templates.TemplateResponse(request, "inventory.html", {"inventory": inventory, "products": products})
+
+
+@app.post("/ui/inventory/create")
+def ui_create_inventory(
+    product_id: int = Form(...),
+    quantity: int = Form(...),
+    location: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    new_item = models.Inventory(product_id=product_id, quantity=quantity, location=location or None)
+    db.add(new_item)
+    db.commit()
+    return RedirectResponse(url="/ui/inventory", status_code=303)
+
+
+@app.post("/ui/inventory/{inventory_id}/delete")
+def ui_delete_inventory(inventory_id: int, db: Session = Depends(get_db)):
+    item = db.query(models.Inventory).filter(models.Inventory.id == inventory_id).first()
+    if item:
+        db.delete(item)
+        db.commit()
+    return RedirectResponse(url="/ui/inventory", status_code=303)
+
+# ---------- UI ROUTES: CUSTOMERS ----------
+
+@app.get("/ui/customers")
+def ui_customers(request: Request, db: Session = Depends(get_db)):
+    customers = db.query(models.Customer).all()
+    return templates.TemplateResponse(request, "customers.html", {"customers": customers})
+
+
+@app.post("/ui/customers/create")
+def ui_create_customer(
+    name: str = Form(...),
+    email: str = Form(...),
+    phone: str = Form(""),
+    address: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    new_customer = models.Customer(name=name, email=email, phone=phone or None, address=address or None)
+    db.add(new_customer)
+    db.commit()
+    return RedirectResponse(url="/ui/customers", status_code=303)
+
+
+@app.post("/ui/customers/{customer_id}/delete")
+def ui_delete_customer(customer_id: int, db: Session = Depends(get_db)):
+    customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
+    if customer:
+        db.delete(customer)
+        db.commit()
+    return RedirectResponse(url="/ui/customers", status_code=303)
+
+# ---------- UI ROUTES: ORDERS ----------
+
+@app.get("/ui/orders")
+def ui_orders(request: Request, db: Session = Depends(get_db)):
+    orders = db.query(models.Order).all()
+    customers = db.query(models.Customer).all()
+    products = db.query(models.Product).all()
+    return templates.TemplateResponse(
+        request, "orders.html", {"orders": orders, "customers": customers, "products": products}
+    )
+
+
+@app.post("/ui/orders/create")
+async def ui_create_order(request: Request, db: Session = Depends(get_db)):
+    form = await request.form()
+    customer_id = int(form["customer_id"])
+    product_ids = form.getlist("product_id")
+    quantities = form.getlist("quantity")
+
+    customer = db.query(models.Customer).filter(models.Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    # Validate stock for every item first
+    for pid, qty in zip(product_ids, quantities):
+        product = db.query(models.Product).filter(models.Product.id == int(pid)).first()
+        if not product:
+            raise HTTPException(status_code=404, detail=f"Product {pid} not found")
+        total_stock = sum(inv.quantity for inv in product.inventory)
+        if total_stock < int(qty):
+            raise HTTPException(status_code=400, detail=f"Not enough stock for {product.name}")
+
+    new_order = models.Order(customer_id=customer_id, status="pending")
+    db.add(new_order)
+    db.commit()
+    db.refresh(new_order)
+
+    for pid, qty in zip(product_ids, quantities):
+        pid, qty = int(pid), int(qty)
+        db.add(models.OrderItem(order_id=new_order.id, product_id=pid, quantity=qty))
+
+        remaining = qty
+        product = db.query(models.Product).filter(models.Product.id == pid).first()
+        for inv in product.inventory:
+            if remaining <= 0:
+                break
+            deduct = min(inv.quantity, remaining)
+            inv.quantity -= deduct
+            remaining -= deduct
+
+    db.commit()
+    return RedirectResponse(url="/ui/orders", status_code=303)
+
+
+@app.post("/ui/orders/{order_id}/status")
+def ui_update_order_status(order_id: int, status: str = Form(...), db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if order:
+        order.status = status
+        db.commit()
+    return RedirectResponse(url="/ui/orders", status_code=303)
